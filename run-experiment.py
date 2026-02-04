@@ -533,7 +533,7 @@ def run_sweep(model_cls, data_dir, project_name, base_cfg=None, sweep_config_pat
     epochs_values = _get_param_values(
         params,
         "epochs",
-        [base_cfg.epochs] if base_cfg else [20]
+        [base_cfg.epochs] if base_cfg else [10]
     )
     stratified_values = _get_param_values(
         params,
@@ -579,7 +579,7 @@ if __name__ == "__main__":
     parser.add_argument("--dataset-ratio", type=float, default=1.0)
     parser.add_argument("--no-stratified", action="store_true",
                         help="Disable stratified splitting.")
-    parser.add_argument("--num-workers", type=int, default=4)
+    parser.add_argument("--num-workers", type=int, default=8)
     parser.add_argument("--no-pin-memory", action="store_true")
     parser.add_argument("--no-amp", action="store_true")
     parser.add_argument("--no-channels-last", action="store_true")
