@@ -39,8 +39,8 @@ python run-experiment.py \
 
 ## Run the full sweep
 
-This runs kfolds {2,5}, batch sizes {32,64}, and dataset ratios
-{0.1, 0.25, 0.5, 1.0}.
+The sweep reads from `conf.yaml` (including model names). Update the values
+there to control the grid.
 
 ```
 python run-experiment.py \
@@ -48,6 +48,17 @@ python run-experiment.py \
   --project-name my_wandb_project \
   --model-name CNNBaseline \
   --sweep
+```
+
+Use a different config file:
+
+```
+python run-experiment.py \
+  --data-dir /path/to/data \
+  --project-name my_wandb_project \
+  --model-name CNNBaseline \
+  --sweep \
+  --sweep-config /path/to/conf.yaml
 ```
 
 ## Available models
