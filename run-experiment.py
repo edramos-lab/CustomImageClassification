@@ -271,7 +271,7 @@ class GradCAM:
         self.activations = None
 
         target_layer.register_forward_hook(self.save_activation)
-        target_layer.register_backward_hook(self.save_gradient)
+        target_layer.register_full_backward_hook(self.save_gradient)
 
     def save_activation(self, module, inp, out):
         self.activations = out
@@ -297,7 +297,7 @@ def log_gradcam(model, loader, device, target_layer):
     x, y = next(iter(loader))
     x = x.to(device)
 
-    heatmap = cam.generate(x[:1], y[0].item()).cpu().numpy()[0]
+    heatmap = cam.generate(x[:1], y[0].item()).detach().cpu().numpy()[0]
 
     fig, ax = plt.subplots()
     ax.imshow(heatmap, cmap="jet")
