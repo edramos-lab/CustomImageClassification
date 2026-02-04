@@ -3,10 +3,95 @@ import os
 import numpy as np
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 import yaml
 from sklearn.model_selection import KFold, StratifiedKFold, StratifiedShuffleSplit
 from torch.utils.data import DataLoader, Subset
+from torchvision import transforms
 from torchvision.datasets import ImageFolder
+
+class ResidualBlock(nn.Module):
+    def __init__(self, in_ch, out_ch, stride=1):
+        super().__init__()
+        self.conv1 = nn.Conv2d(in_ch, out_ch, 3, stride, 1, bias=False)
+        self.bn1 = nn.BatchNorm2d(out_ch)
+        self.conv2 = nn.Conv2d(out_ch, out_ch, 3, 1, 1, bias=False)
+        self.bn2 = nn.BatchNorm2d(out_ch)
+        self.proj = None
+        if stride != 1 or in_ch != out_ch:
+            self.proj = nn.Sequential(
+                nn.Conv2d(in_ch, out_ch, 1, stride, bias=False),
+                nn.BatchNorm2d(out_ch),
+            )
+
+    def forward(self, x):
+        identity = x if self.proj is None else self.proj(x)
+        out = F.relu(self.bn1(self.conv1(x)))
+        out = self.bn2(self.conv2(out))
+        return F.relu(out + identity)
+
+class WaveletTransform(nn.Module):
+    def __init__(self, in_ch):
+        super().__init__()
+        self.in_ch = in_ch
+
+    def forward(self, x):
+        # Simple 4-band expansion to match expected channel count.
+        return torch.cat([x, x, x, x], dim=1)
+
+class TransformerEncoder(nn.Module):
+    def __init__(self, embed_dim=128, num_heads=4, mlp_ratio=4.0, dropout=0.1):
+        super().__init__()
+        self.attn = nn.MultiheadAttention(embed_dim, num_heads, dropout=dropout, batch_first=True)
+        self.norm1 = nn.LayerNorm(embed_dim)
+        self.ff = nn.Sequential(
+            nn.Linear(embed_dim, int(embed_dim * mlp_ratio)),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(int(embed_dim * mlp_ratio), embed_dim),
+            nn.Dropout(dropout),
+        )
+        self.norm2 = nn.LayerNorm(embed_dim)
+
+    def forward(self, x):
+        attn_out, _ = self.attn(x, x, x, need_weights=False)
+        x = self.norm1(x + attn_out)
+        x = self.norm2(x + self.ff(x))
+        return x
+
+def get_transforms(is_train):
+    if is_train:
+        return transforms.Compose([
+            transforms.RandomResizedCrop(224),
+            transforms.RandomHorizontalFlip(),
+            transforms.ToTensor(),
+        ])
+    return transforms.Compose([
+        transforms.Resize((224, 224)),
+        transforms.ToTensor(),
+    ])
+
+def load_dataset(train_dir):
+    ds = ImageFolder(root=train_dir, transform=get_transforms(True))
+    targets = [label for _, label in ds.samples]
+    n_classes = len(ds.classes)
+    return ds, targets, n_classes
+
+def evaluate(model, loader, device):
+    model.eval()
+    correct = 0
+    total = 0
+    y_pred = []
+    with torch.no_grad():
+        for x, y in loader:
+            x, y = x.to(device), y.to(device)
+            logits = model(x)
+            preds = logits.argmax(1)
+            y_pred.extend(preds.cpu().numpy())
+            correct += (preds == y).sum().item()
+            total += y.size(0)
+    acc = correct / total if total else 0.0
+    return acc, y_pred
 
 class CNNBaseline(nn.Module):
     def __init__(self, n):
