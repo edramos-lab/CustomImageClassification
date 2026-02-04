@@ -1,4 +1,5 @@
 import os
+import tempfile
 
 import numpy as np
 import torch
@@ -305,6 +306,32 @@ def log_gradcam(model, loader, device, target_layer):
     wandb.log({"gradcam": wandb.Image(fig)})
     plt.close(fig)
 
+def log_model_artifact(model, cfg, n_classes):
+    artifact = wandb.Artifact(
+        name=f"{cfg.model_name}-fold{wandb.run.name}",
+        type="model",
+        metadata={
+            "model_name": cfg.model_name,
+            "n_classes": n_classes,
+            "kfolds": cfg.kfolds,
+            "batch_size": cfg.batch_size,
+            "lr": cfg.lr,
+            "dataset_ratio": cfg.dataset_ratio,
+        },
+    )
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        model_path = os.path.join(tmp_dir, "model.pth")
+        torch.save(
+            {
+                "model_name": cfg.model_name,
+                "n_classes": n_classes,
+                "state_dict": model.state_dict(),
+            },
+            model_path,
+        )
+        artifact.add_file(model_path, name="model.pth")
+        wandb.log_artifact(artifact)
+
 def train_epoch(model, loader, opt, loss_fn, device):
     model.train()
     losses = []
@@ -396,6 +423,8 @@ def run_experiment(model_cls, data_dir, cfg):
         # Grad-CAM (last CNN layer)
         log_gradcam(model, test_loader, cfg.device,
                     target_layer=list(model.modules())[-3])
+
+        log_model_artifact(model, cfg, n_classes)
 
         wandb.finish()
 
