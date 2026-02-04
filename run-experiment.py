@@ -3,6 +3,7 @@ import os
 import numpy as np
 import torch
 import torch.nn as nn
+import yaml
 from sklearn.model_selection import KFold, StratifiedKFold, StratifiedShuffleSplit
 from torch.utils.data import DataLoader, Subset
 from torchvision.datasets import ImageFolder
@@ -313,27 +314,78 @@ def run_experiment(model_cls, data_dir, cfg):
 
         wandb.finish()
 
-def run_sweep(model_cls, data_dir, project_name, base_cfg=None):
-    kfolds_list = [2, 5]
-    batch_sizes = [32, 64]
-    dataset_ratios = [0.1, 0.25, 0.5, 1.0]
+def _get_param_values(params, name, default):
+    spec = params.get(name)
+    if spec is None:
+        return default
+    if "values" in spec:
+        return spec["values"]
+    if "min" in spec and "max" in spec:
+        return [spec["min"], spec["max"]]
+    return default
 
-    for kfolds in kfolds_list:
-        for batch_size in batch_sizes:
-            for ratio in dataset_ratios:
-                cfg = ExperimentConfig(
-                    project_name=project_name,
-                    kfolds=kfolds,
-                    batch_size=batch_size,
-                    dataset_ratio=ratio
-                )
-                if base_cfg is not None:
-                    cfg.use_stratified = base_cfg.use_stratified
-                    cfg.epochs = base_cfg.epochs
-                    cfg.lr = base_cfg.lr
-                    cfg.model_name = base_cfg.model_name
+def load_sweep_config(path):
+    with open(path, "r", encoding="utf-8") as f:
+        cfg = yaml.safe_load(f) or {}
+    params = cfg.get("parameters", {})
+    return params
 
-                run_experiment(model_cls, data_dir, cfg)
+def run_sweep(model_cls, data_dir, project_name, base_cfg=None, sweep_config_path="conf.yaml"):
+    params = load_sweep_config(sweep_config_path)
+    kfolds_list = _get_param_values(
+        params,
+        "kfolds",
+        [base_cfg.kfolds] if base_cfg else [5]
+    )
+    batch_sizes = _get_param_values(
+        params,
+        "batch_size",
+        [base_cfg.batch_size] if base_cfg else [16]
+    )
+    dataset_ratios = _get_param_values(
+        params,
+        "dataset_ratio",
+        [base_cfg.dataset_ratio] if base_cfg else [1.0]
+    )
+    model_names = _get_param_values(
+        params,
+        "model_name",
+        [base_cfg.model_name] if base_cfg else ["CNNBaseline"]
+    )
+    lr_values = _get_param_values(
+        params,
+        "lr",
+        [base_cfg.lr] if base_cfg else [3e-4]
+    )
+    epochs_values = _get_param_values(
+        params,
+        "epochs",
+        [base_cfg.epochs] if base_cfg else [20]
+    )
+    stratified_values = _get_param_values(
+        params,
+        "use_stratified",
+        [base_cfg.use_stratified] if base_cfg else [True]
+    )
+
+    for model_name in model_names:
+        for kfolds in kfolds_list:
+            for batch_size in batch_sizes:
+                for ratio in dataset_ratios:
+                    for lr in lr_values:
+                        for epochs in epochs_values:
+                            for use_stratified in stratified_values:
+                                cfg = ExperimentConfig(
+                                    project_name=project_name,
+                                    kfolds=kfolds,
+                                    use_stratified=use_stratified,
+                                    epochs=epochs,
+                                    batch_size=batch_size,
+                                    lr=lr,
+                                    model_name=model_name,
+                                    dataset_ratio=ratio
+                                )
+                                run_experiment(model_cls, data_dir, cfg)
 
 if __name__ == "__main__":
     import argparse
@@ -352,6 +404,8 @@ if __name__ == "__main__":
                         help="Disable stratified splitting.")
     parser.add_argument("--sweep", action="store_true",
                         help="Run full sweep of kfolds/batch/ratio.")
+    parser.add_argument("--sweep-config", default="conf.yaml",
+                        help="Path to sweep configuration YAML.")
     args = parser.parse_args()
 
     base_cfg = ExperimentConfig(
@@ -366,6 +420,12 @@ if __name__ == "__main__":
     )
 
     if args.sweep:
-        run_sweep(None, args.data_dir, args.project_name, base_cfg=base_cfg)
+        run_sweep(
+            None,
+            args.data_dir,
+            args.project_name,
+            base_cfg=base_cfg,
+            sweep_config_path=args.sweep_config
+        )
     else:
         run_experiment(None, args.data_dir, base_cfg)
