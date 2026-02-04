@@ -11,6 +11,14 @@ from torch.utils.data import DataLoader, Subset
 from torchvision import transforms
 from torchvision.datasets import ImageFolder
 
+torch.backends.cudnn.benchmark = True
+torch.backends.cuda.matmul.allow_tf32 = True
+torch.backends.cudnn.allow_tf32 = True
+try:
+    torch.set_float32_matmul_precision("high")
+except AttributeError:
+    pass
+
 class ResidualBlock(nn.Module):
     def __init__(self, in_ch, out_ch, stride=1):
         super().__init__()
@@ -78,7 +86,7 @@ def load_dataset(train_dir):
     n_classes = len(ds.classes)
     return ds, targets, n_classes
 
-def evaluate(model, loader, device):
+def evaluate(model, loader, device, amp=False):
     model.eval()
     correct = 0
     total = 0
@@ -86,7 +94,11 @@ def evaluate(model, loader, device):
     with torch.no_grad():
         for x, y in loader:
             x, y = x.to(device), y.to(device)
-            logits = model(x)
+            if amp and device == "cuda":
+                with torch.cuda.amp.autocast():
+                    logits = model(x)
+            else:
+                logits = model(x)
             preds = logits.argmax(1)
             y_pred.extend(preds.cpu().numpy())
             correct += (preds == y).sum().item()
@@ -173,7 +185,11 @@ class ExperimentConfig:
         batch_size=16,
         lr=3e-4,
         model_name="CNNBaseline",
-        dataset_ratio=1.0
+        dataset_ratio=1.0,
+        num_workers=4,
+        pin_memory=True,
+        amp=True,
+        channels_last=True
     ):
         self.project_name = project_name
         self.kfolds = kfolds
@@ -183,6 +199,10 @@ class ExperimentConfig:
         self.lr = lr
         self.model_name = model_name
         self.dataset_ratio = dataset_ratio
+        self.num_workers = num_workers
+        self.pin_memory = pin_memory
+        self.amp = amp
+        self.channels_last = channels_last
         self.device = "cuda" if torch.cuda.is_available() else "cpu"
 
 import wandb
@@ -198,7 +218,11 @@ def init_wandb(cfg, fold):
             "lr": cfg.lr,
             "kfolds": cfg.kfolds,
             "model": cfg.model_name,
-            "dataset_ratio": cfg.dataset_ratio
+            "dataset_ratio": cfg.dataset_ratio,
+            "num_workers": cfg.num_workers,
+            "pin_memory": cfg.pin_memory,
+            "amp": cfg.amp,
+            "channels_last": cfg.channels_last
         },
         reinit=True
     )
@@ -215,15 +239,20 @@ def compute_metrics(y_true, y_pred):
         "f1": f1_score(y_true, y_pred, average="macro"),
         "mcc": matthews_corrcoef(y_true, y_pred)
     }
-def evaluate_test(model, loader, device):
+def evaluate_test(model, loader, device, amp=False):
     model.eval()
     y_true, y_pred, y_prob = [], [], []
 
     with torch.no_grad():
         for x, y in loader:
             x = x.to(device)
-            out = model(x)
-            prob = torch.softmax(out, dim=1)
+            if amp and device == "cuda":
+                with torch.cuda.amp.autocast():
+                    out = model(x)
+                    prob = torch.softmax(out, dim=1)
+            else:
+                out = model(x)
+                prob = torch.softmax(out, dim=1)
 
             y_pred.extend(prob.argmax(1).cpu().numpy())
             y_true.extend(y.numpy())
@@ -332,7 +361,7 @@ def log_model_artifact(model, cfg, n_classes):
         artifact.add_file(model_path, name="model.pth")
         wandb.log_artifact(artifact)
 
-def train_epoch(model, loader, opt, loss_fn, device):
+def train_epoch(model, loader, opt, loss_fn, device, amp=False, scaler=None):
     model.train()
     losses = []
     correct = 0
@@ -341,10 +370,18 @@ def train_epoch(model, loader, opt, loss_fn, device):
     for x, y in loader:
         x, y = x.to(device), y.to(device)
         opt.zero_grad()
-        logits = model(x)
-        loss = loss_fn(logits, y)
-        loss.backward()
-        opt.step()
+        if amp and device == "cuda":
+            with torch.cuda.amp.autocast():
+                logits = model(x)
+                loss = loss_fn(logits, y)
+            scaler.scale(loss).backward()
+            scaler.step(opt)
+            scaler.update()
+        else:
+            logits = model(x)
+            loss = loss_fn(logits, y)
+            loss.backward()
+            opt.step()
         losses.append(loss.item())
         correct += (logits.argmax(1) == y).sum().item()
         total += y.size(0)
@@ -396,24 +433,46 @@ def run_experiment(model_cls, data_dir, cfg):
     for fold, (tr, va) in enumerate(splitter.split(np.zeros(len(targets)), targets)):
         init_wandb(cfg, fold)
 
-        train_loader = DataLoader(Subset(trainval_ds, tr),
-                                  batch_size=cfg.batch_size, shuffle=True)
-        val_loader = DataLoader(Subset(trainval_ds, va),
-                                batch_size=cfg.batch_size)
-        test_loader = DataLoader(test_ds,
-                                 batch_size=cfg.batch_size)
+        train_loader = DataLoader(
+            Subset(trainval_ds, tr),
+            batch_size=cfg.batch_size,
+            shuffle=True,
+            num_workers=cfg.num_workers,
+            pin_memory=cfg.pin_memory,
+            persistent_workers=cfg.num_workers > 0,
+        )
+        val_loader = DataLoader(
+            Subset(trainval_ds, va),
+            batch_size=cfg.batch_size,
+            num_workers=cfg.num_workers,
+            pin_memory=cfg.pin_memory,
+            persistent_workers=cfg.num_workers > 0,
+        )
+        test_loader = DataLoader(
+            test_ds,
+            batch_size=cfg.batch_size,
+            num_workers=cfg.num_workers,
+            pin_memory=cfg.pin_memory,
+            persistent_workers=cfg.num_workers > 0,
+        )
 
         model = model_cls(n_classes).to(cfg.device)
+        if cfg.channels_last and cfg.device == "cuda":
+            model = model.to(memory_format=torch.channels_last)
         opt = torch.optim.AdamW(model.parameters(), lr=cfg.lr)
         loss_fn = nn.CrossEntropyLoss()
+        scaler = torch.cuda.amp.GradScaler(enabled=cfg.amp and cfg.device == "cuda")
 
         for ep in range(cfg.epochs):
-            loss = train_epoch(model, train_loader, opt, loss_fn, cfg.device)
-            acc, _ = evaluate(model, val_loader, cfg.device)
+            loss = train_epoch(
+                model, train_loader, opt, loss_fn, cfg.device,
+                amp=cfg.amp, scaler=scaler
+            )
+            acc, _ = evaluate(model, val_loader, cfg.device, amp=cfg.amp)
             wandb.log({"val_accuracy": acc})
 
         metrics, cm, y_true, y_prob = evaluate_test(
-            model, test_loader, cfg.device
+            model, test_loader, cfg.device, amp=cfg.amp
         )
 
         wandb.log(metrics)
@@ -497,7 +556,11 @@ def run_sweep(model_cls, data_dir, project_name, base_cfg=None, sweep_config_pat
                                     batch_size=batch_size,
                                     lr=lr,
                                     model_name=model_name,
-                                    dataset_ratio=ratio
+                                    dataset_ratio=ratio,
+                                    num_workers=base_cfg.num_workers if base_cfg else 4,
+                                    pin_memory=base_cfg.pin_memory if base_cfg else True,
+                                    amp=base_cfg.amp if base_cfg else True,
+                                    channels_last=base_cfg.channels_last if base_cfg else True
                                 )
                                 run_experiment(model_cls, data_dir, cfg)
 
@@ -516,6 +579,10 @@ if __name__ == "__main__":
     parser.add_argument("--dataset-ratio", type=float, default=1.0)
     parser.add_argument("--no-stratified", action="store_true",
                         help="Disable stratified splitting.")
+    parser.add_argument("--num-workers", type=int, default=4)
+    parser.add_argument("--no-pin-memory", action="store_true")
+    parser.add_argument("--no-amp", action="store_true")
+    parser.add_argument("--no-channels-last", action="store_true")
     parser.add_argument("--sweep", action="store_true",
                         help="Run full sweep of kfolds/batch/ratio.")
     parser.add_argument("--sweep-config", default="conf.yaml",
@@ -530,7 +597,11 @@ if __name__ == "__main__":
         batch_size=args.batch_size,
         lr=args.lr,
         model_name=args.model_name,
-        dataset_ratio=args.dataset_ratio
+        dataset_ratio=args.dataset_ratio,
+        num_workers=args.num_workers,
+        pin_memory=not args.no_pin_memory,
+        amp=not args.no_amp,
+        channels_last=not args.no_channels_last
     )
 
     if args.sweep:
