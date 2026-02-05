@@ -1,5 +1,6 @@
 import os
 import tempfile
+from contextlib import nullcontext
 
 import numpy as np
 import torch
@@ -94,10 +95,12 @@ def evaluate(model, loader, device, amp=False):
     with torch.no_grad():
         for x, y in loader:
             x, y = x.to(device), y.to(device)
-            if amp and device == "cuda":
-                with torch.cuda.amp.autocast():
-                    logits = model(x)
-            else:
+            ctx = (
+                torch.amp.autocast(device_type="cuda")
+                if amp and device == "cuda"
+                else nullcontext()
+            )
+            with ctx:
                 logits = model(x)
             preds = logits.argmax(1)
             y_pred.extend(preds.cpu().numpy())
@@ -107,16 +110,19 @@ def evaluate(model, loader, device, amp=False):
     return acc, y_pred
 
 class CNNBaseline(nn.Module):
-    def __init__(self, n):
+    def __init__(self, n, include_pool=True):
         super().__init__()
-        self.net = nn.Sequential(
+        layers = [
             nn.Conv2d(3, 32, 3, 2, 1),
             nn.BatchNorm2d(32), nn.ReLU(),
             ResidualBlock(32, 64, 2),
             ResidualBlock(64, 128, 2),
             ResidualBlock(128, 256, 2),
-            nn.AdaptiveAvgPool2d(1)
-        )
+        ]
+        if include_pool:
+            layers.append(nn.AdaptiveAvgPool2d(1))
+        self.net = nn.Sequential(*layers)
+        self.include_pool = include_pool
         self.fc = nn.Linear(256, n)
 
     def forward(self, x):
@@ -134,10 +140,10 @@ class CNNWavelet(CNNBaseline):
 class CNNViT(nn.Module):
     def __init__(self, n):
         super().__init__()
-        self.cnn = CNNBaseline(256)
-        self.patch = nn.Conv2d(256, 128, 4, 4)
+        self.cnn = CNNBaseline(256, include_pool=False)
+        self.patch = nn.Conv2d(256, 128, 1, 1)
         self.cls = nn.Parameter(torch.zeros(1, 1, 128))
-        self.pos = nn.Parameter(torch.zeros(1, 17, 128))
+        self.pos = nn.Parameter(torch.zeros(1, 197, 128))
         self.tr = nn.Sequential(TransformerEncoder(), TransformerEncoder())
         self.norm = nn.LayerNorm(128)
         self.fc = nn.Linear(128, n)
@@ -146,7 +152,9 @@ class CNNViT(nn.Module):
         x = self.cnn.net(x)
         x = self.patch(x).flatten(2).transpose(1, 2)
         B = x.size(0)
-        x = torch.cat((self.cls.expand(B, -1, -1), x), 1) + self.pos
+        x = torch.cat((self.cls.expand(B, -1, -1), x), 1)
+        pos = self.pos[:, : x.size(1), :]
+        x = x + pos
         x = self.tr(x)
         return self.fc(self.norm(x[:, 0]))
 
@@ -262,11 +270,12 @@ def evaluate_test(model, loader, device, amp=False):
     with torch.no_grad():
         for x, y in loader:
             x = x.to(device)
-            if amp and device == "cuda":
-                with torch.cuda.amp.autocast():
-                    out = model(x)
-                    prob = torch.softmax(out, dim=1)
-            else:
+            ctx = (
+                torch.amp.autocast(device_type="cuda")
+                if amp and device == "cuda"
+                else nullcontext()
+            )
+            with ctx:
                 out = model(x)
                 prob = torch.softmax(out, dim=1)
 
@@ -408,16 +417,19 @@ def train_epoch(model, loader, opt, loss_fn, device, amp=False, scaler=None,
     for x, y in loader:
         x, y = x.to(device), y.to(device)
         opt.zero_grad()
+        ctx = (
+            torch.amp.autocast(device_type="cuda")
+            if amp and device == "cuda"
+            else nullcontext()
+        )
+        with ctx:
+            logits = model(x)
+            loss = loss_fn(logits, y)
         if amp and device == "cuda":
-            with torch.cuda.amp.autocast():
-                logits = model(x)
-                loss = loss_fn(logits, y)
             scaler.scale(loss).backward()
             scaler.step(opt)
             scaler.update()
         else:
-            logits = model(x)
-            loss = loss_fn(logits, y)
             loss.backward()
             opt.step()
         losses.append(loss.item())
@@ -507,7 +519,9 @@ def run_experiment(model_cls, data_dir, cfg):
             model = model.to(memory_format=torch.channels_last)
         opt = torch.optim.AdamW(model.parameters(), lr=cfg.lr)
         loss_fn = nn.CrossEntropyLoss()
-        scaler = torch.cuda.amp.GradScaler(enabled=cfg.amp and cfg.device == "cuda")
+        scaler = torch.amp.GradScaler(
+            "cuda", enabled=cfg.amp and cfg.device == "cuda"
+        )
 
         for ep in range(cfg.epochs):
             loss = train_epoch(
