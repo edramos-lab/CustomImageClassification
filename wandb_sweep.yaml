@@ -1,0 +1,42 @@
+program: /CustomImageClassification/run-experiment.py
+method: bayes
+metric:
+  name: val_accuracy
+  goal: maximize
+parameters:
+  lr:
+    distribution: log_uniform_values
+    min: 0.0001
+    max: 0.001
+  batch_size:
+    values: [32, 64]  
+  epochs:
+    values: [10]
+  kfolds:
+    values: [2,5]
+  dataset_ratio:
+    values: [0.1,0.25,0.5,1.0]
+  model_name:
+    values: [CNNBaseline,CNNWavelet,CNNViT,WaveletCNNViT]
+command:
+  - ${env}
+  - ${interpreter}
+  - ${program}
+  - --data-dir
+  - /content/dataset
+  - --project-name
+  - image-classification-sweep-CNNBaseline
+  - --model-name
+  - ${model_name}
+  - --lr
+  - ${lr}
+  - --batch-size
+  - ${batch_size}
+  - --epochs
+  - ${epochs}
+  - --kfolds
+  - ${kfolds}
+  - --dataset-ratio
+  - ${dataset_ratio}
+  - --num-workers
+  - 8
