@@ -143,7 +143,7 @@ class CNNViT(nn.Module):
         self.cnn = CNNBaseline(256, include_pool=False)
         self.patch = nn.Conv2d(256, 128, 1, 1)
         self.cls = nn.Parameter(torch.zeros(1, 1, 128))
-        self.pos = nn.Parameter(torch.zeros(1, 197, 128))
+        self.pos = nn.Parameter(torch.zeros(1, 1024, 128))
         self.tr = nn.Sequential(TransformerEncoder(), TransformerEncoder())
         self.norm = nn.LayerNorm(128)
         self.fc = nn.Linear(128, n)
@@ -153,7 +153,12 @@ class CNNViT(nn.Module):
         x = self.patch(x).flatten(2).transpose(1, 2)
         B = x.size(0)
         x = torch.cat((self.cls.expand(B, -1, -1), x), 1)
-        pos = self.pos[:, : x.size(1), :]
+        seq_len = x.size(1)
+        pos = self.pos
+        if pos.size(1) < seq_len:
+            pos = F.pad(pos, (0, 0, 0, seq_len - pos.size(1)))
+        else:
+            pos = pos[:, :seq_len, :]
         x = x + pos
         x = self.tr(x)
         return self.fc(self.norm(x[:, 0]))
