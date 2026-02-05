@@ -263,9 +263,9 @@ from sklearn.metrics import (
 def compute_metrics(y_true, y_pred):
     return {
         "accuracy": accuracy_score(y_true, y_pred),
-        "precision": precision_score(y_true, y_pred, average="macro"),
-        "recall": recall_score(y_true, y_pred, average="macro"),
-        "f1": f1_score(y_true, y_pred, average="macro"),
+        "precision": precision_score(y_true, y_pred, average="macro", zero_division=0),
+        "recall": recall_score(y_true, y_pred, average="macro", zero_division=0),
+        "f1": f1_score(y_true, y_pred, average="macro", zero_division=0),
         "mcc": matthews_corrcoef(y_true, y_pred)
     }
 def evaluate_test(model, loader, device, amp=False):
@@ -344,11 +344,21 @@ class GradCAM:
         out = self.model(x)
         out[:, class_idx].backward()
 
+        if self.gradients is None or self.activations is None:
+            raise RuntimeError("GradCAM hooks did not capture activations.")
+        if self.gradients.ndim < 4 or self.activations.ndim < 4:
+            raise RuntimeError("GradCAM requires a 4D conv feature map.")
         w = self.gradients.mean(dim=(2, 3), keepdim=True)
         cam = (w * self.activations).sum(dim=1)
         cam = torch.relu(cam)
         cam = cam / cam.max()
         return cam
+
+def get_last_conv_layer(model):
+    for module in reversed(list(model.modules())):
+        if isinstance(module, nn.Conv2d):
+            return module
+    raise ValueError("No Conv2d layer found for Grad-CAM.")
 
 def log_gradcam(model, loader, device, target_layer, class_names, key_prefix):
     model.eval()
@@ -549,7 +559,7 @@ def run_experiment(model_cls, data_dir, cfg):
             model,
             test_loader,
             cfg.device,
-            target_layer=list(model.modules())[-3],
+            target_layer=get_last_conv_layer(model),
             class_names=test_ds.classes,
             key_prefix=fold_prefix,
         )
