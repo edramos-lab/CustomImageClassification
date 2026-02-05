@@ -1,4 +1,4 @@
-program: /CustomImageClassification/run-experiment.py
+program: /content/CustomImageClassification/run-experiment.py
 method: bayes
 metric:
   name: val_accuracy
@@ -26,17 +26,6 @@ command:
   - /content/dataset
   - --project-name
   - image-classification-sweep-CNNBaseline
-  - --model-name
-  - ${model_name}
-  - --lr
-  - ${lr}
-  - --batch-size
-  - ${batch_size}
-  - --epochs
-  - ${epochs}
-  - --kfolds
-  - ${kfolds}
-  - --dataset-ratio
-  - ${dataset_ratio}
   - --num-workers
   - 8
+  - ${args}

@@ -599,9 +599,13 @@ if __name__ == "__main__":
                         choices=sorted(MODEL_REGISTRY.keys()))
     parser.add_argument("--epochs", type=int, default=20)
     parser.add_argument("--batch-size", type=int, default=16)
+    parser.add_argument("--batch_size", dest="batch_size", type=int)
     parser.add_argument("--lr", type=float, default=3e-4)
     parser.add_argument("--kfolds", type=int, default=5)
     parser.add_argument("--dataset-ratio", type=float, default=1.0)
+    parser.add_argument("--dataset_ratio", dest="dataset_ratio", type=float)
+    parser.add_argument("--model_name", dest="model_name",
+                        choices=sorted(MODEL_REGISTRY.keys()))
     parser.add_argument("--no-stratified", action="store_true",
                         help="Disable stratified splitting.")
     parser.add_argument("--num-workers", type=int, default=8)
