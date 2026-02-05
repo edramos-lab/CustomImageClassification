@@ -50,6 +50,43 @@ python run-experiment.py \
   --sweep
 ```
 
+## W&B sweep example
+
+If you want W&B to orchestrate runs, use a W&B sweep config that specifies
+the program and arguments. Example `wandb_sweep.yaml`:
+
+```
+program: run-experiment.py
+method: bayes
+metric:
+  name: val_accuracy
+  goal: maximize
+parameters:
+  lr:
+    min: 1e-4
+    max: 1e-3
+  batch_size:
+    values: [32, 64]
+command:
+  - ${env}
+  - ${interpreter}
+  - ${program}
+  - --data-dir
+  - /path/to/data
+  - --project-name
+  - my_wandb_project
+  - --model-name
+  - CNNBaseline
+```
+
+Run the sweep:
+
+```
+wandb login
+wandb sweep wandb_sweep.yaml
+wandb agent <entity>/<project>/<sweep_id>
+```
+
 Use a different config file:
 
 ```

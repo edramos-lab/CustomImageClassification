@@ -320,20 +320,40 @@ class GradCAM:
         cam = cam / cam.max()
         return cam
 
-def log_gradcam(model, loader, device, target_layer):
+def log_gradcam(model, loader, device, target_layer, class_names):
     model.eval()
     cam = GradCAM(model, target_layer)
+    collected = {}
 
-    x, y = next(iter(loader))
-    x = x.to(device)
+    for x, y in loader:
+        for i in range(x.size(0)):
+            class_idx = y[i].item()
+            if class_idx in collected:
+                continue
 
-    heatmap = cam.generate(x[:1], y[0].item()).detach().cpu().numpy()[0]
+            x_i = x[i:i + 1].to(device)
+            cam_map = cam.generate(x_i, class_idx).detach().cpu()
+            img = x_i.detach().cpu()[0].clamp(0, 1)
 
-    fig, ax = plt.subplots()
-    ax.imshow(heatmap, cmap="jet")
-    ax.axis("off")
-    wandb.log({"gradcam": wandb.Image(fig)})
-    plt.close(fig)
+            cam_resized = F.interpolate(
+                cam_map.unsqueeze(0),
+                size=img.shape[1:],
+                mode="bilinear",
+                align_corners=False,
+            )[0, 0]
+            cam_resized = (cam_resized - cam_resized.min()) / (cam_resized.max() + 1e-6)
+
+            fig, ax = plt.subplots()
+            ax.imshow(img.permute(1, 2, 0).numpy())
+            ax.imshow(cam_resized.numpy(), cmap="jet", alpha=0.4)
+            ax.set_title(class_names[class_idx])
+            ax.axis("off")
+            wandb.log({f"gradcam/{class_names[class_idx]}": wandb.Image(fig)})
+            plt.close(fig)
+
+            collected[class_idx] = True
+            if len(collected) == len(class_names):
+                return
 
 def log_model_artifact(model, cfg, n_classes):
     artifact = wandb.Artifact(
@@ -480,8 +500,13 @@ def run_experiment(model_cls, data_dir, cfg):
         log_roc_curve(y_true, y_prob, test_ds.classes)
 
         # Grad-CAM (last CNN layer)
-        log_gradcam(model, test_loader, cfg.device,
-                    target_layer=list(model.modules())[-3])
+        log_gradcam(
+            model,
+            test_loader,
+            cfg.device,
+            target_layer=list(model.modules())[-3],
+            class_names=test_ds.classes,
+        )
 
         log_model_artifact(model, cfg, n_classes)
 
