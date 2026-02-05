@@ -207,25 +207,41 @@ class ExperimentConfig:
 
 import wandb
 
-def init_wandb(cfg, fold):
+def ensure_wandb(cfg):
     ratio_label = str(cfg.dataset_ratio).replace(".", "p")
-    wandb.init(
-        project=cfg.project_name,
-        name=f"{cfg.model_name}_k{cfg.kfolds}_b{cfg.batch_size}_r{ratio_label}_fold{fold}",
-        config={
-            "epochs": cfg.epochs,
-            "batch_size": cfg.batch_size,
-            "lr": cfg.lr,
-            "kfolds": cfg.kfolds,
-            "model": cfg.model_name,
-            "dataset_ratio": cfg.dataset_ratio,
-            "num_workers": cfg.num_workers,
-            "pin_memory": cfg.pin_memory,
-            "amp": cfg.amp,
-            "channels_last": cfg.channels_last
-        },
-        reinit=True
-    )
+    if wandb.run is None:
+        wandb.init(
+            project=cfg.project_name,
+            name=f"{cfg.model_name}_k{cfg.kfolds}_b{cfg.batch_size}_r{ratio_label}",
+            config={
+                "epochs": cfg.epochs,
+                "batch_size": cfg.batch_size,
+                "lr": cfg.lr,
+                "kfolds": cfg.kfolds,
+                "model": cfg.model_name,
+                "dataset_ratio": cfg.dataset_ratio,
+                "num_workers": cfg.num_workers,
+                "pin_memory": cfg.pin_memory,
+                "amp": cfg.amp,
+                "channels_last": cfg.channels_last
+            },
+        )
+    else:
+        wandb.config.update(
+            {
+                "epochs": cfg.epochs,
+                "batch_size": cfg.batch_size,
+                "lr": cfg.lr,
+                "kfolds": cfg.kfolds,
+                "model": cfg.model_name,
+                "dataset_ratio": cfg.dataset_ratio,
+                "num_workers": cfg.num_workers,
+                "pin_memory": cfg.pin_memory,
+                "amp": cfg.amp,
+                "channels_last": cfg.channels_last
+            },
+            allow_val_change=True,
+        )
 
 from sklearn.metrics import (
     accuracy_score, precision_score, recall_score,
@@ -265,19 +281,19 @@ def evaluate_test(model, loader, device, amp=False):
 import seaborn as sns
 import matplotlib.pyplot as plt
 
-def log_confusion_matrix(cm, class_names):
+def log_confusion_matrix(cm, class_names, key_prefix):
     fig, ax = plt.subplots(figsize=(6, 6))
     sns.heatmap(cm, annot=True, fmt="d", cmap="Blues",
                 xticklabels=class_names,
                 yticklabels=class_names)
     ax.set_xlabel("Predicted")
     ax.set_ylabel("True")
-    wandb.log({"confusion_matrix": wandb.Image(fig)})
+    wandb.log({f"{key_prefix}/confusion_matrix": wandb.Image(fig)})
     plt.close(fig)
 
 from sklearn.preprocessing import label_binarize
 
-def log_roc_curve(y_true, y_prob, class_names):
+def log_roc_curve(y_true, y_prob, class_names, key_prefix):
     y_true_bin = label_binarize(y_true, classes=range(len(class_names)))
 
     fig, ax = plt.subplots(figsize=(7, 7))
@@ -290,7 +306,7 @@ def log_roc_curve(y_true, y_prob, class_names):
     ax.set_xlabel("False Positive Rate")
     ax.set_ylabel("True Positive Rate")
     ax.legend()
-    wandb.log({"roc_curve": wandb.Image(fig)})
+    wandb.log({f"{key_prefix}/roc_curve": wandb.Image(fig)})
     plt.close(fig)
 
 class GradCAM:
@@ -320,7 +336,7 @@ class GradCAM:
         cam = cam / cam.max()
         return cam
 
-def log_gradcam(model, loader, device, target_layer, class_names):
+def log_gradcam(model, loader, device, target_layer, class_names, key_prefix):
     model.eval()
     cam = GradCAM(model, target_layer)
     collected = {}
@@ -348,16 +364,16 @@ def log_gradcam(model, loader, device, target_layer, class_names):
             ax.imshow(cam_resized.numpy(), cmap="jet", alpha=0.4)
             ax.set_title(class_names[class_idx])
             ax.axis("off")
-            wandb.log({f"gradcam/{class_names[class_idx]}": wandb.Image(fig)})
+            wandb.log({f"{key_prefix}/gradcam/{class_names[class_idx]}": wandb.Image(fig)})
             plt.close(fig)
 
             collected[class_idx] = True
             if len(collected) == len(class_names):
                 return
 
-def log_model_artifact(model, cfg, n_classes):
+def log_model_artifact(model, cfg, n_classes, fold):
     artifact = wandb.Artifact(
-        name=f"{cfg.model_name}-fold{wandb.run.name}",
+        name=f"{cfg.model_name}-fold{fold}",
         type="model",
         metadata={
             "model_name": cfg.model_name,
@@ -366,6 +382,7 @@ def log_model_artifact(model, cfg, n_classes):
             "batch_size": cfg.batch_size,
             "lr": cfg.lr,
             "dataset_ratio": cfg.dataset_ratio,
+            "fold": fold,
         },
     )
     with tempfile.TemporaryDirectory() as tmp_dir:
@@ -381,7 +398,8 @@ def log_model_artifact(model, cfg, n_classes):
         artifact.add_file(model_path, name="model.pth")
         wandb.log_artifact(artifact)
 
-def train_epoch(model, loader, opt, loss_fn, device, amp=False, scaler=None):
+def train_epoch(model, loader, opt, loss_fn, device, amp=False, scaler=None,
+                log_prefix=None, step=None):
     model.train()
     losses = []
     correct = 0
@@ -407,7 +425,14 @@ def train_epoch(model, loader, opt, loss_fn, device, amp=False, scaler=None):
         total += y.size(0)
 
     acc = correct / total if total else 0.0
-    wandb.log({"train_loss": np.mean(losses), "acc": acc})
+    if log_prefix:
+        wandb.log(
+            {f"{log_prefix}/train_loss": np.mean(losses),
+             f"{log_prefix}/acc": acc},
+            step=step,
+        )
+    else:
+        wandb.log({"train_loss": np.mean(losses), "acc": acc}, step=step)
     return np.mean(losses)
 
 def _apply_dataset_ratio(trainval_ds, targets, ratio, use_stratified):
@@ -431,6 +456,7 @@ def _apply_dataset_ratio(trainval_ds, targets, ratio, use_stratified):
     return Subset(trainval_ds, subset_idx), subset_targets
 
 def run_experiment(model_cls, data_dir, cfg):
+    ensure_wandb(cfg)
     model_cls = get_model_cls(model_cls, cfg.model_name)
     trainval_ds, targets, n_classes = load_dataset(os.path.join(data_dir, "train"))
     trainval_ds, targets = _apply_dataset_ratio(
@@ -451,7 +477,7 @@ def run_experiment(model_cls, data_dir, cfg):
     )
 
     for fold, (tr, va) in enumerate(splitter.split(np.zeros(len(targets)), targets)):
-        init_wandb(cfg, fold)
+        fold_prefix = f"fold_{fold}"
 
         train_loader = DataLoader(
             Subset(trainval_ds, tr),
@@ -486,18 +512,18 @@ def run_experiment(model_cls, data_dir, cfg):
         for ep in range(cfg.epochs):
             loss = train_epoch(
                 model, train_loader, opt, loss_fn, cfg.device,
-                amp=cfg.amp, scaler=scaler
+                amp=cfg.amp, scaler=scaler, log_prefix=fold_prefix, step=ep
             )
             acc, _ = evaluate(model, val_loader, cfg.device, amp=cfg.amp)
-            wandb.log({"val_accuracy": acc})
+            wandb.log({f"{fold_prefix}/val_accuracy": acc}, step=ep)
 
         metrics, cm, y_true, y_prob = evaluate_test(
             model, test_loader, cfg.device, amp=cfg.amp
         )
 
-        wandb.log(metrics)
-        log_confusion_matrix(cm, test_ds.classes)
-        log_roc_curve(y_true, y_prob, test_ds.classes)
+        wandb.log({f"{fold_prefix}/{k}": v for k, v in metrics.items()})
+        log_confusion_matrix(cm, test_ds.classes, fold_prefix)
+        log_roc_curve(y_true, y_prob, test_ds.classes, fold_prefix)
 
         # Grad-CAM (last CNN layer)
         log_gradcam(
@@ -506,11 +532,10 @@ def run_experiment(model_cls, data_dir, cfg):
             cfg.device,
             target_layer=list(model.modules())[-3],
             class_names=test_ds.classes,
+            key_prefix=fold_prefix,
         )
 
-        log_model_artifact(model, cfg, n_classes)
-
-        wandb.finish()
+        log_model_artifact(model, cfg, n_classes, fold)
 
 def _get_param_values(params, name, default):
     spec = params.get(name)
